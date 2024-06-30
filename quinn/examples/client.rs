@@ -5,7 +5,7 @@
 use std::{
     fs,
     io::{self, Write},
-    net::{SocketAddr, ToSocketAddrs},
+    net::{Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -54,9 +54,16 @@ fn main() {
             .finish(),
     )
     .unwrap();
-    let opt = Opt::parse();
+    //let opt = Opt::parse();
     let code = {
-        if let Err(e) = run(opt) {
+        if let Err(e) = run(Opt {
+            keylog: false,
+            url: "https://localhost:4433/Cargo.toml".try_into().unwrap(),
+            host: None,
+            ca: None,
+            rebind: false,
+            bind: SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 8998, 0, 0)),
+        }) {
             eprintln!("ERROR: {e}");
             1
         } else {
@@ -117,35 +124,44 @@ async fn run(options: Opt) -> Result<()> {
         .await
         .map_err(|e| anyhow!("failed to connect: {}", e))?;
     eprintln!("connected at {:?}", start.elapsed());
-    let (mut send, mut recv) = conn
-        .open_bi()
-        .await
-        .map_err(|e| anyhow!("failed to open stream: {}", e))?;
-    if rebind {
-        let socket = std::net::UdpSocket::bind("[::]:0").unwrap();
-        let addr = socket.local_addr().unwrap();
-        eprintln!("rebinding to {addr}");
-        endpoint.rebind(socket).expect("rebind failed");
-    }
+    loop {
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| anyhow!("failed to open stream: {}", e))?;
+        if rebind {
+            let socket = std::net::UdpSocket::bind("[::]:0").unwrap();
+            let addr = socket.local_addr().unwrap();
+            eprintln!("rebinding to {addr}");
+            endpoint.rebind(socket).expect("rebind failed");
+        }
 
-    send.write_all(request.as_bytes())
-        .await
-        .map_err(|e| anyhow!("failed to send request: {}", e))?;
-    send.finish().unwrap();
-    let response_start = Instant::now();
-    eprintln!("request sent at {:?}", response_start - start);
-    let resp = recv
-        .read_to_end(usize::MAX)
-        .await
-        .map_err(|e| anyhow!("failed to read response: {}", e))?;
-    let duration = response_start.elapsed();
-    eprintln!(
-        "response received in {:?} - {} KiB/s",
-        duration,
-        resp.len() as f32 / (duration_secs(&duration) * 1024.0)
-    );
-    io::stdout().write_all(&resp).unwrap();
-    io::stdout().flush().unwrap();
+        let request = request.clone();
+        tokio::spawn(async move {
+            send.write_all(request.as_bytes())
+                .await
+                .map_err(|e| anyhow!("failed to send request: {}", e))?;
+            send.finish().unwrap();
+            let response_start = Instant::now();
+            //eprintln!("request sent at {:?}", response_start - start);
+            let resp = recv
+                .read_to_end(usize::MAX)
+                .await
+                .map_err(|e| anyhow!("failed to read response: {}", e))?;
+            let duration = response_start.elapsed();
+            eprintln!(
+                "response received in {:?} - {} KiB/s",
+                duration,
+                resp.len() as f32 / (duration_secs(&duration) * 1024.0)
+            );
+
+            anyhow::Ok(())
+        });
+        dbg!(conn.rtt_estimator_snapshot());
+        /*io::stdout().write_all(&resp).unwrap();
+        io::stdout().flush().unwrap();*/
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+    }
     conn.close(0u32.into(), b"done");
 
     // Give the server a fair chance to receive the close packet
